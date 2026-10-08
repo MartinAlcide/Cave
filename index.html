@@ -632,18 +632,43 @@ const isStandalone = () => {
 
 /* Entree de garde : une fois installee, l'app a derriere elle une entree
    d'historique que l'on ne controle pas (page vide), et "retour" y menait,
-   d'ou l'ecran noir. On se cale donc sur deux entrees a nous : "retour" a la
-   racine retombe toujours sur une page de l'app, jamais sur le vide. */
-if (isStandalone()) {
+   d'ou l'ecran noir. On s'appuie donc sur une entree a nous, posee APRES le
+   premier toucher : les navigateurs sautent les entrees creees sans geste de
+   l'utilisateur (protection anti-piege du bouton retour).
+   A la racine, "retour" ramene sur l'entree de base ; on repart alors aussitot
+   vers l'entree de garde (history.forward n'est pas soumis a cette protection),
+   sans en creer de nouvelle : on reste dans l'app. */
+let guardArmed = false;
+function armGuard() {
+  if (guardArmed || !isStandalone()) return;
+  guardArmed = true;
   try {
-    window.history.replaceState({
-      cave: "base"
-    }, "");
     window.history.pushState({
-      cave: "app"
+      cave: "guard"
     }, "");
   } catch (e) {
-    /* historique indisponible : tant pis */
+    guardArmed = false;
+  }
+}
+if (isStandalone()) {
+  const st = window.history.state;
+  if (st && st.cave === "guard") {
+    guardArmed = true; /* page rechargee alors que la garde existait deja */
+  } else {
+    try {
+      window.history.replaceState({
+        cave: "base"
+      }, "");
+    } catch (e) {
+      /* historique indisponible : tant pis */
+    }
+    const onFirstTouch = () => {
+      window.removeEventListener("click", onFirstTouch, true);
+      window.removeEventListener("keydown", onFirstTouch, true);
+      armGuard();
+    };
+    window.addEventListener("click", onFirstTouch, true);
+    window.addEventListener("keydown", onFirstTouch, true);
   }
 }
 window.addEventListener("popstate", () => {
@@ -655,14 +680,16 @@ window.addEventListener("popstate", () => {
   if (top) {
     top.popped = true;
     top.close();
-  } else if (isStandalone()) {
-    /* "retour" a la racine : on remet l'entree de garde et on reste dans l'app */
-    try {
-      window.history.pushState({
-        cave: "app"
-      }, "");
-    } catch (e) {
-      /* rien */
+  } else if (isStandalone() && guardArmed) {
+    const st = window.history.state;
+    if (!st || st.cave !== "guard") {
+      /* "retour" a la racine : on repart vers l'entree de garde */
+      ignorePops++;
+      try {
+        window.history.forward();
+      } catch (e) {
+        ignorePops--;
+      }
     }
   }
 });
@@ -894,13 +921,15 @@ function Field({
   type,
   min
 }) {
-  const [focused, setFocused] = useState(false);
+  const [open, setOpen] = useState(false);
 
   /* suggestions dessinees par l'app (pas de <datalist>, que Firefox pour
      Android ne gere pas) : on garde les valeurs deja saisies qui
-     contiennent ce qui est tape, celles qui commencent par la saisie d'abord */
+     contiennent ce qui est tape, celles qui commencent par la saisie d'abord.
+     La liste s'ouvre quand on tape, se ferme des qu'on choisit une proposition
+     (ou qu'on quitte le champ) et ne reapparait qu'a la saisie suivante. */
   const nv = norm(value);
-  const suggestions = focused && nv && items ? items.filter(v => norm(v).indexOf(nv) !== -1 && norm(v) !== nv).sort((a, b) => (norm(a).indexOf(nv) === 0 ? 0 : 1) - (norm(b).indexOf(nv) === 0 ? 0 : 1)).slice(0, 6) : [];
+  const suggestions = open && nv && items ? items.filter(v => norm(v).indexOf(nv) !== -1 && norm(v) !== nv).sort((a, b) => (norm(a).indexOf(nv) === 0 ? 0 : 1) - (norm(b).indexOf(nv) === 0 ? 0 : 1)).slice(0, 6) : [];
   return /*#__PURE__*/React.createElement("div", {
     className: "relative"
   }, /*#__PURE__*/React.createElement("label", {
@@ -912,9 +941,11 @@ function Field({
     type: type || "text",
     min: min,
     value: value,
-    onChange: onChange,
-    onFocus: () => setFocused(true),
-    onBlur: () => setFocused(false),
+    onChange: e => {
+      setOpen(true);
+      onChange(e);
+    },
+    onBlur: () => setOpen(false),
     autoComplete: "off",
     autoCorrect: "off",
     spellCheck: false,
@@ -933,11 +964,14 @@ function Field({
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
     onMouseDown: e => e.preventDefault(),
-    onClick: () => onChange({
-      target: {
-        value: v
-      }
-    }),
+    onClick: () => {
+      setOpen(false);
+      onChange({
+        target: {
+          value: v
+        }
+      });
+    },
     className: "block w-full text-left px-3 py-2 text-[15px]",
     style: {
       color: INK,
