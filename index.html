@@ -323,7 +323,9 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
 })();
 
 </script>
-<script>
+<script type="module">
+import { openCave, DriveControls, createConflictPrompt } from './src/drive-ui.js';
+const conflicts = createConflictPrompt();
 const {
   useState,
   useEffect,
@@ -356,7 +358,6 @@ const COLORS = [{
 }];
 const SANS_LIEU = "Sans lieu";
 const SANS_PAYS = "Pays non renseign\u00e9";
-const KEY = "cave-v1";
 
 /* ---------- helpers ---------- */
 const fr = (a, b) => (a || "").localeCompare(b || "", "fr", {
@@ -1673,6 +1674,10 @@ function Cave() {
   const [lastModified, setLastModified] = useState(null);
   const [loading, setLoading] = useState(true);
   const [storageError, setStorageError] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [store, setStore] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const pendingWrites = useRef(0);
   const [sortBy, setSortBy] = useState("type");
   const [tab, setTab] = useState("rouge");
   const [showForm, setShowForm] = useState(false);
@@ -1691,32 +1696,51 @@ function Cave() {
   const fileInputRef = useRef(null);
   const wide = useWide(640);
   useEffect(() => {
+    let subscription;
     (async () => {
       try {
-        const r = await window.storage.get(KEY);
-        if (r && r.value) {
-          const d = JSON.parse(r.value);
+        const storage = await openCave({ chooseConflict: input => conflicts.choose(input) });
+        setStore(storage);
+        subscription = storage.subscribe(d => {
+          if (pendingWrites.current) return;
           setBottles(d.bottles || []);
           setLastModified(d.lastModified || null);
-        }
+        });
       } catch (e) {
-        /* cave encore vide */
+        setLoadError("Impossible d’ouvrir la cave locale. Les données d’origine sont conservées. " + e.message);
       }
       setLoading(false);
     })();
+    return () => subscription?.unsubscribe();
   }, []);
-  const commit = async next => {
+  const commit = async (next, base = { bottles, lastModified }) => {
     const ts = Date.now();
+    let persisted = false;
+    pendingWrites.current++;
+    setSaving(true);
     setBottles(next);
     setLastModified(ts);
     try {
-      const ok = await window.storage.set(KEY, JSON.stringify({
+      await store.save({
         bottles: next,
         lastModified: ts
-      }));
-      setStorageError(!ok);
+      }, base);
+      persisted = true;
+      setStorageError(false);
     } catch (e) {
       setStorageError(true);
+    } finally {
+      pendingWrites.current--;
+      if (!pendingWrites.current) setSaving(false);
+      if (!pendingWrites.current && persisted) {
+        try {
+          const saved = await store.read();
+          setBottles(saved.bottles);
+          setLastModified(saved.lastModified);
+        } catch (e) {
+          setStorageError(true);
+        }
+      }
     }
   };
   useEffect(() => {
@@ -1770,10 +1794,14 @@ function Cave() {
       location: f.location.trim()
     };
     const twin = bottles.find(x => x.id !== id && sameWine(x, updated));
+    const exists = bottles.some(x => x.id === id);
+    const base = { lastModified, bottles: exists
+      ? bottles.map(x => x.id === id ? editing : x)
+      : [...bottles, editing] };
     commit(twin ? bottles.filter(x => x.id !== id).map(x => x.id === twin.id ? {
       ...x,
       quantity: x.quantity + updated.quantity
-    } : x) : bottles.map(x => x.id === id ? updated : x));
+    } : x) : exists ? bottles.map(x => x.id === id ? updated : x) : [...bottles, updated], base);
     setEditing(null);
     if (sortBy === "type") setTab(updated.color);
   };
@@ -1896,6 +1924,7 @@ function Cave() {
       }
     }, "Ouverture de la cave…");
   }
+  if (loadError) return React.createElement("p", { role: "alert", style: { padding: 24, color: WINE } }, loadError);
   const current = groups.find(g => g.id === tab);
   return /*#__PURE__*/React.createElement("div", {
     className: "py-6",
@@ -1953,7 +1982,7 @@ function Cave() {
       height: 36
     },
     "aria-label": "Ajouter une bouteille"
-  }, "+"))), /*#__PURE__*/React.createElement("div", {
+  }, "+"))), React.createElement(DriveControls, { store, conflicts, storageError }), /*#__PURE__*/React.createElement("div", {
     className: "flex items-baseline justify-between mt-6 text-[13px]",
     style: serif
   }, /*#__PURE__*/React.createElement("div", {
@@ -2041,13 +2070,14 @@ function Cave() {
     setOpenId: setOpenId,
     step: step,
     onEdit: setEditing
-  })))), storageError ? /*#__PURE__*/React.createElement("p", {
+  })))), storageError || saving ? /*#__PURE__*/React.createElement("p", {
+    role: "status",
     className: "italic text-[13px] fixed bottom-3 left-5",
     style: {
       color: WINE,
       ...serif
     }
-  }, "Les dernières modifications n'ont pas pu être enregistrées.") : null, undo ? /*#__PURE__*/React.createElement("div", {
+  }, storageError ? "Les dernières modifications n'ont pas pu être enregistrées." : "Enregistrement local…") : null, undo ? /*#__PURE__*/React.createElement("div", {
     className: "fixed bottom-5 flex items-baseline gap-5 px-4 py-2",
     style: {
       background: INK,
@@ -2118,26 +2148,6 @@ function Cave() {
   }) : null));
 }
 
-/* ---------- persistance locale : meme forme d'API que window.storage,
-   mais adossee a localStorage, sans aucun appel reseau ---------- */
-window.storage = {
-  get: async key => {
-    const raw = localStorage.getItem(key);
-    return raw === null ? null : {
-      key,
-      value: raw,
-      shared: false
-    };
-  },
-  set: async (key, value) => {
-    localStorage.setItem(key, value);
-    return {
-      key,
-      value,
-      shared: false
-    };
-  }
-};
 const rootEl = document.getElementById("root");
 ReactDOM.createRoot(rootEl).render(/*#__PURE__*/React.createElement(Cave, null));
 </script>
