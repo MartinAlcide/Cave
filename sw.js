@@ -1,17 +1,16 @@
-const CACHE = "cave-v1";
-const SHELL = ["./", "./manifest.json"];
+const CACHE = "cave-shell-__BUILD_HASH__";
+const SHELL = ["./", "./cave.js", "./manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(SHELL))
   );
-  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+      Promise.all(keys.filter((k) => (k === "cave-v1" || k.startsWith("cave-shell-")) && k !== CACHE).map((k) => caches.delete(k)))
     )
   );
   self.clients.claim();
@@ -19,19 +18,10 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
-  if (req.mode === "navigate" || req.destination === "document") {
-    event.respondWith(
-      fetch(req)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((cache) => cache.put(req, copy));
-          return res;
-        })
-        .catch(() => caches.match("./"))
-    );
-    return;
-  }
+  // Never cache GIS, tokens or Drive API responses, only the versioned app shell.
+  if (new URL(req.url).origin !== self.location.origin || req.method !== "GET") return;
+  const shellUrl = req.mode === "navigate" ? new URL('./', self.registration.scope).href : req.url;
   event.respondWith(
-    caches.match(req).then((cached) => cached || fetch(req))
+    caches.open(CACHE).then(cache => cache.match(shellUrl)).then(cached => cached || fetch(req))
   );
 });
